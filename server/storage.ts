@@ -5,6 +5,8 @@ import {
   hints, type Hint, type InsertHint,
   DailyChallenge, MemoryCard
 } from "@shared/schema";
+import { db } from "./db";
+import { eq, desc } from "drizzle-orm";
 
 // Storage interface with all required CRUD methods
 export interface IStorage {
@@ -35,106 +37,120 @@ export interface IStorage {
   getMemoryCards(difficulty: number): Promise<MemoryCard[]>;
 }
 
-export class MemStorage implements IStorage {
-  private users: Map<number, User>;
-  private games: Map<number, Game>;
-  private scores: Score[];
-  private hints: Hint[];
-  private dailyChallenges: DailyChallenge[];
-  private memoryIcons: string[];
-  
-  private userCurrentId: number;
-  private gameCurrentId: number;
-  private scoreCurrentId: number;
-  private hintCurrentId: number;
-  private challengeCurrentId: number;
+export class DatabaseStorage implements IStorage {
+  private memoryIcons: string[] = [
+    "home", "favorite", "star", "settings", "person", 
+    "lightbulb", "pets", "music_note", "school", "work",
+    "flight", "restaurant", "shopping_cart", "local_cafe", "directions_bike",
+    "beach_access", "local_movies", "sports_basketball", "sports_soccer", "cake"
+  ];
+
+  private dailyChallenges: DailyChallenge[] = [];
+  private challengeCurrentId: number = 1;
 
   constructor() {
-    this.users = new Map();
-    this.games = new Map();
-    this.scores = [];
-    this.hints = [];
-    this.dailyChallenges = [];
-    this.memoryIcons = [
-      "home", "favorite", "star", "settings", "person", 
-      "lightbulb", "pets", "music_note", "school", "work",
-      "flight", "restaurant", "shopping_cart", "local_cafe", "directions_bike",
-      "beach_access", "local_movies", "sports_basketball", "sports_soccer", "cake"
-    ];
-    
-    this.userCurrentId = 1;
-    this.gameCurrentId = 1;
-    this.scoreCurrentId = 1;
-    this.hintCurrentId = 1;
-    this.challengeCurrentId = 1;
-    
-    // Initialize with default games
-    this.initializeGames();
-    this.initializeHints();
-    this.initializeDailyChallenges();
+    // Note: Database initialization happens in db.ts
+    // We'll initialize default data when we first query for it
   }
 
   // User methods
   async getUser(id: number): Promise<User | undefined> {
-    return this.users.get(id);
+    const [user] = await db.select().from(users).where(eq(users.id, id));
+    return user;
   }
 
   async getUserByUsername(username: string): Promise<User | undefined> {
-    return Array.from(this.users.values()).find(
-      (user) => user.username === username,
-    );
+    const [user] = await db.select().from(users).where(eq(users.username, username));
+    return user;
   }
 
   async createUser(insertUser: InsertUser): Promise<User> {
-    const id = this.userCurrentId++;
-    const user: User = { ...insertUser, id };
-    this.users.set(id, user);
+    const [user] = await db.insert(users).values(insertUser).returning();
     return user;
   }
   
   // Game methods
   async getGames(): Promise<Game[]> {
-    return Array.from(this.games.values());
+    const existingGames = await db.select().from(games);
+    
+    // If no games exist yet, initialize them
+    if (existingGames.length === 0) {
+      await this.initializeGames();
+      return this.getGames();
+    }
+    
+    return existingGames;
   }
   
   async getGame(id: number): Promise<Game | undefined> {
-    return this.games.get(id);
+    const [game] = await db.select().from(games).where(eq(games.id, id));
+    return game;
   }
   
   async createGame(game: InsertGame): Promise<Game> {
-    const id = this.gameCurrentId++;
-    const newGame: Game = { ...game, id };
-    this.games.set(id, newGame);
+    const [newGame] = await db.insert(games).values(game).returning();
     return newGame;
   }
   
   // Score methods
   async getScores(gameId?: number, userId?: number): Promise<Score[]> {
-    return this.scores.filter(score => 
-      (gameId === undefined || score.gameId === gameId) &&
-      (userId === undefined || score.userId === userId)
-    );
+    let query = db.select().from(scores);
+    
+    if (gameId !== undefined && userId !== undefined) {
+      return await db.select().from(scores)
+        .where(eq(scores.gameId, gameId))
+        .where(eq(scores.userId, userId));
+    } else if (gameId !== undefined) {
+      return await db.select().from(scores)
+        .where(eq(scores.gameId, gameId));
+    } else if (userId !== undefined) {
+      return await db.select().from(scores)
+        .where(eq(scores.userId, userId));
+    }
+    
+    return await query;
   }
   
   async getBestScore(gameId: number, userId?: number): Promise<Score | undefined> {
-    const filteredScores = await this.getScores(gameId, userId);
-    if (filteredScores.length === 0) return undefined;
-    
-    return filteredScores.reduce((highest, current) => 
-      current.score > highest.score ? current : highest
-    );
+    if (userId !== undefined) {
+      const results = await db.select().from(scores)
+        .where(eq(scores.gameId, gameId))
+        .where(eq(scores.userId, userId))
+        .orderBy(desc(scores.score))
+        .limit(1);
+      
+      return results[0];
+    } else {
+      const results = await db.select().from(scores)
+        .where(eq(scores.gameId, gameId))
+        .orderBy(desc(scores.score))
+        .limit(1);
+      
+      return results[0];
+    }
   }
   
   async createScore(score: InsertScore): Promise<Score> {
-    const id = this.scoreCurrentId++;
-    const newScore: Score = { ...score, id };
-    this.scores.push(newScore);
+    // Ensure date is set if not provided
+    if (!score.date) {
+      score.date = new Date();
+    }
+    
+    const [newScore] = await db.insert(scores).values(score).returning();
     return newScore;
   }
   
   // Hint methods
   async getHints(gameId: number): Promise<Hint[]> {
-    return this.hints.filter(hint => hint.gameId === gameId);
+    const gameHints = await db.select().from(hints).where(eq(hints.gameId, gameId));
+    
+    // If no hints exist yet for this game, initialize them
+    if (gameHints.length === 0) {
+      await this.initializeHints();
+      return this.getHints(gameId);
+    }
+    
+    return gameHints;
   }
   
   async getRandomHint(gameId: number): Promise<Hint | undefined> {
@@ -146,13 +162,11 @@ export class MemStorage implements IStorage {
   }
   
   async createHint(hint: InsertHint): Promise<Hint> {
-    const id = this.hintCurrentId++;
-    const newHint: Hint = { ...hint, id };
-    this.hints.push(newHint);
+    const [newHint] = await db.insert(hints).values(hint).returning();
     return newHint;
   }
   
-  // Daily challenge methods
+  // Daily challenge methods - we'll keep these in memory for simplicity
   async getDailyChallenge(gameId: number): Promise<DailyChallenge | undefined> {
     const today = new Date().toISOString().split('T')[0];
     
@@ -184,7 +198,7 @@ export class MemStorage implements IStorage {
   }
   
   // Helper methods for initialization
-  private initializeGames() {
+  private async initializeGames() {
     const defaultGames: InsertGame[] = [
       {
         name: "Memory Match",
@@ -206,10 +220,12 @@ export class MemStorage implements IStorage {
       },
     ];
     
-    defaultGames.forEach(game => this.createGame(game));
+    for (const game of defaultGames) {
+      await this.createGame(game);
+    }
   }
   
-  private initializeHints() {
+  private async initializeHints() {
     const memoryMatchHints: InsertHint[] = [
       { gameId: 1, hintText: "Try to focus on a few cards at a time rather than the whole board" },
       { gameId: 1, hintText: "Create a mental grid map to remember where you've seen certain icons" },
@@ -228,22 +244,10 @@ export class MemStorage implements IStorage {
       { gameId: 3, hintText: "Notice patterns in the distribution of numbers" }
     ];
     
-    [...memoryMatchHints, ...patternRecallHints, ...numberHuntHints].forEach(
-      hint => this.createHint(hint)
-    );
-  }
-  
-  private initializeDailyChallenges() {
-    // Create today's challenges for each game with random difficulties
-    const today = new Date().toISOString().split('T')[0];
+    const allHints = [...memoryMatchHints, ...patternRecallHints, ...numberHuntHints];
     
-    for (let gameId = 1; gameId <= 3; gameId++) {
-      this.dailyChallenges.push({
-        id: gameId,
-        gameId,
-        date: today,
-        difficulty: Math.floor(Math.random() * 5) + 1 // Random difficulty 1-5
-      });
+    for (const hint of allHints) {
+      await this.createHint(hint);
     }
   }
   
@@ -263,4 +267,4 @@ export class MemStorage implements IStorage {
   }
 }
 
-export const storage = new MemStorage();
+export const storage = new DatabaseStorage();
